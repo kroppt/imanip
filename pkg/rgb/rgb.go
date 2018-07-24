@@ -209,6 +209,80 @@ func EdgeDetect(img image.Image, op EdgeOperator, threshold float64) (image.Imag
 	return eImg, nil
 }
 
+// EdgeDirection returns an image representing edge detection direction in color
+// The saturation and lightness is based on the magnitude of change
+// The color is based on the direction of change
+func EdgeDirection(img image.Image, op EdgeOperator) (image.Image, error) {
+	eImg := image.NewRGBA(img.Bounds())
+	xGrad, err := op.GradientX()
+	if err != nil {
+		return eImg, err
+	}
+	yGrad, err := op.GradientY()
+	if err != nil {
+		return eImg, err
+	}
+	if len(xGrad)%2 == 0 || len(xGrad)%2 == 0 {
+		return eImg, errors.New("Gradient of non-odd length")
+	}
+	if len(yGrad)%2 == 0 || len(yGrad)%2 == 0 {
+		return eImg, errors.New("Gradient of non-odd length")
+	}
+	if len(xGrad) != len(yGrad) || len(xGrad[0]) != len(yGrad[0]) {
+		return eImg, errors.New("Gradients do not have equal size")
+	}
+	size := img.Bounds().Size()
+	minX := len(xGrad[0])
+	if len(yGrad[0]) < minX {
+		minX = len(yGrad[0])
+	}
+	if size.X < minX {
+		return eImg,
+			errors.New("Image size is smaller than the gradient size")
+	}
+	minY := len(xGrad)
+	if len(yGrad) < minX {
+		minY = len(yGrad)
+	}
+	if size.Y < minY {
+		return eImg,
+			errors.New("Image size is smaller than the gradient size")
+	}
+	// can't convolute past edge of image
+	// black sides of len(mat)/2 length
+	xbuf := len(xGrad) / 2
+	ybuf := len(xGrad[0]) / 2
+	for y := ybuf; y < size.Y-ybuf; y++ {
+		for x := xbuf; x < size.X-xbuf; x++ {
+			var xSum float64
+			for my := range xGrad {
+				for mx, m := range xGrad[my] {
+					c := img.At(x+xbuf-mx, y+ybuf-my)
+					g, _, _, _ := color.GrayModel.Convert(c).RGBA()
+					xSum += float64(int32(g>>8) * int32(m))
+				}
+			}
+			var ySum float64
+			for my := range yGrad {
+				for mx, m := range yGrad[my] {
+					c := img.At(x+xbuf-mx, y+ybuf-my)
+					g, _, _, _ := color.GrayModel.Convert(c).RGBA()
+					ySum += float64(int32(g>>8) * int32(m))
+				}
+			}
+			mag := math.Sqrt(ySum*ySum + xSum*xSum)
+			// if magnitude exceeds 255
+			if mag > float64(^uint8(0)) {
+				mag = float64(^uint8(0))
+			}
+			angle := math.Atan(ySum/xSum) * 360.0 / math.Pi
+			c := colorful.Hsv(angle, mag/255.0, mag/255.0)
+			eImg.Set(x, y, c)
+		}
+	}
+	return eImg, nil
+}
+
 // Convolute returns a convoluted copy of the given image with the given matrix
 func Convolute(img image.Image, mat [][]float64) (image.Image, error) {
 	cImg := image.NewGray(img.Bounds())
