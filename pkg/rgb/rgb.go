@@ -5,6 +5,7 @@ import (
 	"image"
 	"image/color"
 	"math"
+	"sync"
 
 	colorful "github.com/lucasb-eyer/go-colorful"
 )
@@ -33,30 +34,37 @@ func Saturate(img image.Image, modify float64) image.Image {
 	}
 	sImg := image.NewRGBA(img.Bounds())
 	size := img.Bounds().Size()
-	for i := 0; i < size.X; i++ {
-		for j := 0; j < size.Y; j++ {
-			col, ok := colorful.MakeColor(img.At(i, j))
-			if !ok {
-				sImg.Set(i, j, col)
-				continue
+	wg := &sync.WaitGroup{}
+	operate := func(x, y int) {
+		defer wg.Done()
+		col, ok := colorful.MakeColor(img.At(x, y))
+		if !ok {
+			sImg.Set(x, y, col)
+			return
+		}
+		h, s, v := col.Hsv()
+		var newSat, factor float64
+		if modify >= 0 {
+			room := 1 - s
+			grey := s
+			if s > 0.5 {
+				grey = 1
 			}
-			h, s, v := col.Hsv()
-			var newSat, factor float64
-			if modify >= 0 {
-				room := 1 - s
-				grey := s
-				if s > 0.5 {
-					grey = 1
-				}
-				factor = modify * room * grey
-			} else {
-				room := s
-				factor = modify * room
-			}
-			newSat = s + factor
-			sImg.Set(i, j, colorful.Hsv(h, newSat, v))
+			factor = modify * room * grey
+		} else {
+			room := s
+			factor = modify * room
+		}
+		newSat = s + factor
+		sImg.Set(x, y, colorful.Hsv(h, newSat, v))
+	}
+	for x := 0; x < size.X; x++ {
+		for y := 0; y < size.Y; y++ {
+			wg.Add(1)
+			go operate(x, y)
 		}
 	}
+	wg.Wait()
 	return sImg
 }
 
@@ -177,35 +185,42 @@ func EdgeDetect(img image.Image, op EdgeOperator, threshold float64) (image.Imag
 	// black sides of len(mat)/2 length
 	xbuf := len(xGrad) / 2
 	ybuf := len(xGrad[0]) / 2
+	wg := &sync.WaitGroup{}
+	operate := func(x, y int) {
+		defer wg.Done()
+		var xSum float64
+		for my := range xGrad {
+			for mx, m := range xGrad[my] {
+				c := img.At(x+xbuf-mx, y+ybuf-my)
+				g, _, _, _ := eImg.ColorModel().Convert(c).RGBA()
+				xSum += float64(int32(g>>8) * int32(m))
+			}
+		}
+		var ySum float64
+		for my := range yGrad {
+			for mx, m := range yGrad[my] {
+				c := img.At(x+xbuf-mx, y+ybuf-my)
+				g, _, _, _ := eImg.ColorModel().Convert(c).RGBA()
+				ySum += float64(int32(g>>8) * int32(m))
+			}
+		}
+		mag := math.Sqrt(ySum*ySum + xSum*xSum)
+		if mag < threshold {
+			mag = threshold
+		}
+		// if magnitude exceeds 255
+		if mag > float64(^uint8(0)) {
+			mag = float64(^uint8(0))
+		}
+		eImg.SetGray(x, y, color.Gray{uint8(mag)})
+	}
 	for y := ybuf; y < size.Y-ybuf; y++ {
 		for x := xbuf; x < size.X-xbuf; x++ {
-			var xSum float64
-			for my := range xGrad {
-				for mx, m := range xGrad[my] {
-					c := img.At(x+xbuf-mx, y+ybuf-my)
-					g, _, _, _ := eImg.ColorModel().Convert(c).RGBA()
-					xSum += float64(int32(g>>8) * int32(m))
-				}
-			}
-			var ySum float64
-			for my := range yGrad {
-				for mx, m := range yGrad[my] {
-					c := img.At(x+xbuf-mx, y+ybuf-my)
-					g, _, _, _ := eImg.ColorModel().Convert(c).RGBA()
-					ySum += float64(int32(g>>8) * int32(m))
-				}
-			}
-			mag := math.Sqrt(ySum*ySum + xSum*xSum)
-			if mag < threshold {
-				mag = threshold
-			}
-			// if magnitude exceeds 255
-			if mag > float64(^uint8(0)) {
-				mag = float64(^uint8(0))
-			}
-			eImg.SetGray(x, y, color.Gray{uint8(mag)})
+			wg.Add(1)
+			go operate(x, y)
 		}
 	}
+	wg.Wait()
 	return eImg, nil
 }
 
@@ -252,34 +267,41 @@ func EdgeDirection(img image.Image, op EdgeOperator) (image.Image, error) {
 	// black sides of len(mat)/2 length
 	xbuf := len(xGrad) / 2
 	ybuf := len(xGrad[0]) / 2
+	wg := &sync.WaitGroup{}
+	operate := func(x, y int) {
+		defer wg.Done()
+		var xSum float64
+		for my := range xGrad {
+			for mx, m := range xGrad[my] {
+				c := img.At(x+xbuf-mx, y+ybuf-my)
+				g, _, _, _ := color.GrayModel.Convert(c).RGBA()
+				xSum += float64(int32(g>>8) * int32(m))
+			}
+		}
+		var ySum float64
+		for my := range yGrad {
+			for mx, m := range yGrad[my] {
+				c := img.At(x+xbuf-mx, y+ybuf-my)
+				g, _, _, _ := color.GrayModel.Convert(c).RGBA()
+				ySum += float64(int32(g>>8) * int32(m))
+			}
+		}
+		mag := math.Sqrt(ySum*ySum + xSum*xSum)
+		// if magnitude exceeds 255
+		if mag > float64(^uint8(0)) {
+			mag = float64(^uint8(0))
+		}
+		angle := math.Atan(ySum/xSum) * 360.0 / math.Pi
+		c := colorful.Hsv(angle, mag/255.0, mag/255.0)
+		eImg.Set(x, y, c)
+	}
 	for y := ybuf; y < size.Y-ybuf; y++ {
 		for x := xbuf; x < size.X-xbuf; x++ {
-			var xSum float64
-			for my := range xGrad {
-				for mx, m := range xGrad[my] {
-					c := img.At(x+xbuf-mx, y+ybuf-my)
-					g, _, _, _ := color.GrayModel.Convert(c).RGBA()
-					xSum += float64(int32(g>>8) * int32(m))
-				}
-			}
-			var ySum float64
-			for my := range yGrad {
-				for mx, m := range yGrad[my] {
-					c := img.At(x+xbuf-mx, y+ybuf-my)
-					g, _, _, _ := color.GrayModel.Convert(c).RGBA()
-					ySum += float64(int32(g>>8) * int32(m))
-				}
-			}
-			mag := math.Sqrt(ySum*ySum + xSum*xSum)
-			// if magnitude exceeds 255
-			if mag > float64(^uint8(0)) {
-				mag = float64(^uint8(0))
-			}
-			angle := math.Atan(ySum/xSum) * 360.0 / math.Pi
-			c := colorful.Hsv(angle, mag/255.0, mag/255.0)
-			eImg.Set(x, y, c)
+			wg.Add(1)
+			go operate(x, y)
 		}
 	}
+	wg.Wait()
 	return eImg, nil
 }
 
@@ -316,25 +338,32 @@ func Convolute(img image.Image, mat [][]float64) (image.Image, error) {
 	// black sides of len(mat)/2 length
 	xbuf := len(mat) / 2
 	ybuf := len(mat[0]) / 2
+	wg := &sync.WaitGroup{}
+	operate := func(x, y int) {
+		defer wg.Done()
+		var sum float64
+		for my := range mat {
+			for mx, m := range mat[my] {
+				c := img.At(x+xbuf-mx, y+ybuf-my)
+				g, _, _, _ := cImg.ColorModel().Convert(c).RGBA()
+				sum += float64(g>>8) * m
+			}
+		}
+		sum *= norm
+		if sum < 0 {
+			sum *= -1
+		}
+		if sum > float64(^uint8(0)) {
+			sum = float64(^uint8(0))
+		}
+		cImg.SetGray(x, y, color.Gray{uint8(sum)})
+	}
 	for y := ybuf; y < size.Y-ybuf; y++ {
 		for x := xbuf; x < size.X-xbuf; x++ {
-			var sum float64
-			for my := range mat {
-				for mx, m := range mat[my] {
-					c := img.At(x+xbuf-mx, y+ybuf-my)
-					g, _, _, _ := cImg.ColorModel().Convert(c).RGBA()
-					sum += float64(g>>8) * m
-				}
-			}
-			sum *= norm
-			if sum < 0 {
-				sum *= -1
-			}
-			if sum > float64(^uint8(0)) {
-				sum = float64(^uint8(0))
-			}
-			cImg.SetGray(x, y, color.Gray{uint8(sum)})
+			wg.Add(1)
+			go operate(x, y)
 		}
 	}
+	wg.Wait()
 	return cImg, nil
 }
